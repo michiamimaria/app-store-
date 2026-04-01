@@ -381,6 +381,13 @@ type CartState = {
   reservationActive: boolean;
 };
 
+type ChatMessage = {
+  id: string;
+  role: 'me' | 'other';
+  text: string;
+  meta?: string;
+};
+
 type CartSheetProps = {
   visible: boolean;
   onClose: () => void;
@@ -560,6 +567,174 @@ function BasketSheet({ visible, onClose, sessionId, cart, loading, onRefresh }: 
   );
 }
 
+type AiSheetProps = {
+  visible: boolean;
+  onClose: () => void;
+  sessionId: string | null;
+};
+
+function AskAiSheet({ visible, onClose, sessionId }: AiSheetProps) {
+  const insets = useSafeAreaInsets();
+  const [input, setInput] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [messages, setMessages] = useState<ChatMessage[]>([
+    {
+      id: 'ai-hello',
+      role: 'other',
+      text: 'Hi! Ask me things like "Best phone under $500?" or "Compare iPhone vs Samsung".',
+      meta: 'SmartHub AI',
+    },
+  ]);
+
+  const send = async () => {
+    const text = input.trim();
+    if (!text || loading) return;
+    const my: ChatMessage = { id: `m-${Date.now()}`, role: 'me', text };
+    setMessages((prev) => [...prev, my]);
+    setInput('');
+    setLoading(true);
+    try {
+      const data = (await apiJson('/api/ai/suggest', sessionId, {
+        method: 'POST',
+        body: JSON.stringify({ query: text }),
+      })) as { reply?: string };
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: `a-${Date.now()}`,
+          role: 'other',
+          text: data.reply ?? 'No response from assistant.',
+          meta: 'SmartHub AI',
+        },
+      ]);
+    } catch (e) {
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: `aerr-${Date.now()}`,
+          role: 'other',
+          text: e instanceof Error ? e.message : 'Could not reach AI service.',
+          meta: 'System',
+        },
+      ]);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
+      <View style={styles.modalFrame}>
+        <Pressable style={styles.modalBackdrop} onPress={onClose} />
+        <View style={[styles.aiSheet, { paddingBottom: Math.max(insets.bottom, 14) }]}>
+          <View style={styles.sheetHandleWrap}>
+            <View style={styles.sheetHandle} />
+          </View>
+          <View style={styles.aiHead}>
+            <Text style={styles.aiTitle}>Ask AI</Text>
+            <Pressable onPress={onClose} hitSlop={12}>
+              <Ionicons name="close" size={24} color={palette.textMuted} />
+            </Pressable>
+          </View>
+          <ScrollView style={styles.aiThread} contentContainerStyle={styles.aiThreadContent}>
+            {messages.map((msg) => (
+              <View
+                key={msg.id}
+                style={[styles.aiBubble, msg.role === 'me' ? styles.aiBubbleMe : styles.aiBubbleOther]}
+              >
+                {msg.meta ? <Text style={styles.aiMeta}>{msg.meta}</Text> : null}
+                <Text style={[styles.aiText, msg.role === 'me' ? styles.aiTextMe : styles.aiTextOther]}>
+                  {msg.text}
+                </Text>
+              </View>
+            ))}
+          </ScrollView>
+          <View style={styles.aiComposer}>
+            <TextInput
+              value={input}
+              onChangeText={setInput}
+              placeholder="Ask for recommendations..."
+              placeholderTextColor={palette.textDim}
+              style={styles.aiInput}
+              editable={!loading}
+            />
+            <Pressable onPress={send} style={({ pressed }) => [styles.aiSend, pressed && styles.pressed]}>
+              {loading ? (
+                <ActivityIndicator color={palette.bg} />
+              ) : (
+                <Ionicons name="send" size={16} color={palette.bg} />
+              )}
+            </Pressable>
+          </View>
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
+type MessagesSheetProps = {
+  visible: boolean;
+  onClose: () => void;
+  messages: ChatMessage[];
+  onSend: (text: string) => void;
+};
+
+function MessagesSheet({ visible, onClose, messages, onSend }: MessagesSheetProps) {
+  const insets = useSafeAreaInsets();
+  const [draft, setDraft] = useState('');
+
+  const send = () => {
+    const text = draft.trim();
+    if (!text) return;
+    onSend(text);
+    setDraft('');
+  };
+
+  return (
+    <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
+      <View style={styles.modalFrame}>
+        <Pressable style={styles.modalBackdrop} onPress={onClose} />
+        <View style={[styles.aiSheet, { paddingBottom: Math.max(insets.bottom, 14) }]}>
+          <View style={styles.sheetHandleWrap}>
+            <View style={styles.sheetHandle} />
+          </View>
+          <View style={styles.aiHead}>
+            <Text style={styles.aiTitle}>Messages</Text>
+            <Pressable onPress={onClose} hitSlop={12}>
+              <Ionicons name="close" size={24} color={palette.textMuted} />
+            </Pressable>
+          </View>
+          <ScrollView style={styles.aiThread} contentContainerStyle={styles.aiThreadContent}>
+            {messages.map((msg) => (
+              <View
+                key={msg.id}
+                style={[styles.aiBubble, msg.role === 'me' ? styles.aiBubbleMe : styles.aiBubbleOther]}
+              >
+                {msg.meta ? <Text style={styles.aiMeta}>{msg.meta}</Text> : null}
+                <Text style={[styles.aiText, msg.role === 'me' ? styles.aiTextMe : styles.aiTextOther]}>
+                  {msg.text}
+                </Text>
+              </View>
+            ))}
+          </ScrollView>
+          <View style={styles.aiComposer}>
+            <TextInput
+              value={draft}
+              onChangeText={setDraft}
+              placeholder="Type a message..."
+              placeholderTextColor={palette.textDim}
+              style={styles.aiInput}
+            />
+            <Pressable onPress={send} style={({ pressed }) => [styles.aiSend, pressed && styles.pressed]}>
+              <Ionicons name="paper-plane-outline" size={16} color={palette.bg} />
+            </Pressable>
+          </View>
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
 function MainScreen() {
   const insets = useSafeAreaInsets();
   const [items, setItems] = useState<Listing[]>([]);
@@ -572,8 +747,18 @@ function MainScreen() {
   const [compareProduct, setCompareProduct] = useState<Listing | null>(null);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [basketOpen, setBasketOpen] = useState(false);
+  const [aiOpen, setAiOpen] = useState(false);
+  const [messagesOpen, setMessagesOpen] = useState(false);
   const [cart, setCart] = useState<CartState | null>(null);
   const [cartLoading, setCartLoading] = useState(false);
+  const [sellerMessages, setSellerMessages] = useState<ChatMessage[]>([
+    {
+      id: 's-1',
+      role: 'other',
+      text: 'Hi! This is TechVault Pro. Ask for availability, condition, or best offer.',
+      meta: 'TechVault Pro',
+    },
+  ]);
 
   useEffect(() => {
     let cancelled = false;
@@ -685,6 +870,26 @@ function MainScreen() {
     setSearch('');
     setCategory('All');
     setCondition('All');
+  };
+
+  const sendSellerMessage = (text: string) => {
+    const my = { id: `me-${Date.now()}`, role: 'me' as const, text };
+    const lower = text.toLowerCase();
+    let reply = 'Thanks! This item is available. We can ship in 2-3 days.';
+    if (lower.includes('best price') || lower.includes('discount')) {
+      reply = 'For SmartHub users, we can usually match the best verified offer.';
+    } else if (lower.includes('condition')) {
+      reply = 'Condition is exactly as listed, tested before shipping.';
+    } else if (lower.includes('available') || lower.includes('stock')) {
+      reply = 'Yes, currently in stock. Reserve in basket to lock your price.';
+    }
+    const seller = {
+      id: `seller-${Date.now() + 1}`,
+      role: 'other' as const,
+      text: reply,
+      meta: 'TechVault Pro',
+    };
+    setSellerMessages((prev) => [...prev, my, seller]);
   };
 
   const renderSkeleton = () => (
@@ -976,6 +1181,13 @@ function MainScreen() {
         loading={cartLoading}
         onRefresh={refreshCart}
       />
+      <AskAiSheet visible={aiOpen} onClose={() => setAiOpen(false)} sessionId={sessionId} />
+      <MessagesSheet
+        visible={messagesOpen}
+        onClose={() => setMessagesOpen(false)}
+        messages={sellerMessages}
+        onSend={sendSellerMessage}
+      />
 
       {loading ? (
         <View style={styles.flex1}>
@@ -1012,7 +1224,7 @@ function MainScreen() {
         pointerEvents="none"
       />
       <View style={[styles.bottomBar, { marginBottom: Math.max(insets.bottom, 6) }]}>
-        <Pressable style={({ pressed }) => [styles.bottomBtn, pressed && styles.pressed]}>
+        <Pressable onPress={() => setAiOpen(true)} style={({ pressed }) => [styles.bottomBtn, pressed && styles.pressed]}>
           <Ionicons name="sparkles-outline" size={20} color={palette.violet} />
           <Text style={styles.bottomBtnText}>Ask AI</Text>
         </Pressable>
@@ -1023,7 +1235,7 @@ function MainScreen() {
           <Ionicons name="bag-outline" size={20} color={palette.accent} />
           <Text style={[styles.bottomBtnText, { color: palette.accent }]}>Basket</Text>
         </Pressable>
-        <Pressable style={({ pressed }) => [styles.bottomBtn, pressed && styles.pressed]}>
+        <Pressable onPress={() => setMessagesOpen(true)} style={({ pressed }) => [styles.bottomBtn, pressed && styles.pressed]}>
           <Ionicons name="chatbubble-ellipses-outline" size={20} color={palette.textMuted} />
           <Text style={[styles.bottomBtnText, { color: palette.textMuted }]}>Messages</Text>
         </Pressable>
@@ -2087,5 +2299,96 @@ const styles = StyleSheet.create({
     fontSize: 15,
     fontWeight: '800',
     color: palette.gold,
+  },
+  aiSheet: {
+    backgroundColor: palette.bgElevated,
+    borderTopLeftRadius: 28,
+    borderTopRightRadius: 28,
+    borderWidth: 1,
+    borderColor: palette.border,
+    maxHeight: '90%',
+    paddingHorizontal: 16,
+    paddingTop: 8,
+  },
+  aiHead: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingHorizontal: 4,
+    paddingVertical: 8,
+  },
+  aiTitle: {
+    fontSize: 20,
+    fontWeight: '800',
+    color: palette.text,
+  },
+  aiThread: {
+    maxHeight: 360,
+  },
+  aiThreadContent: {
+    paddingVertical: 8,
+    gap: 10,
+  },
+  aiBubble: {
+    borderRadius: 14,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    borderWidth: 1,
+  },
+  aiBubbleMe: {
+    alignSelf: 'flex-end',
+    maxWidth: '86%',
+    backgroundColor: 'rgba(34, 211, 238, 0.14)',
+    borderColor: 'rgba(34, 211, 238, 0.35)',
+  },
+  aiBubbleOther: {
+    alignSelf: 'flex-start',
+    maxWidth: '92%',
+    backgroundColor: palette.surface,
+    borderColor: palette.border,
+  },
+  aiMeta: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: palette.textDim,
+    marginBottom: 4,
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+  },
+  aiText: {
+    fontSize: 14,
+    lineHeight: 20,
+  },
+  aiTextMe: {
+    color: palette.text,
+  },
+  aiTextOther: {
+    color: palette.textMuted,
+  },
+  aiComposer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingTop: 10,
+    borderTopWidth: 1,
+    borderTopColor: palette.border,
+  },
+  aiInput: {
+    flex: 1,
+    minHeight: 44,
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    backgroundColor: palette.surface,
+    borderWidth: 1,
+    borderColor: palette.border,
+    color: palette.text,
+  },
+  aiSend: {
+    width: 44,
+    height: 44,
+    borderRadius: 12,
+    backgroundColor: palette.accent,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
 });
