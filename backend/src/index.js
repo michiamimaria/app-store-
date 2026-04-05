@@ -3,6 +3,7 @@ import express from "express";
 import cors from "cors";
 import { productsRouter } from "./routes/products.js";
 import { cartRouter } from "./routes/cart.js";
+import { paymentsRouter } from "./routes/payments.js";
 import { aiRouter } from "./routes/ai.js";
 
 const app = express();
@@ -17,6 +18,7 @@ app.get("/health", (_req, res) => {
 
 app.use("/api/products", productsRouter);
 app.use("/api/cart", cartRouter);
+app.use("/api/payments", paymentsRouter);
 app.use("/api/ai", aiRouter);
 
 app.use((_req, res) => {

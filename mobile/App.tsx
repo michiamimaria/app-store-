@@ -148,6 +148,15 @@ function formatPrice(currency: string, price: number) {
   }).format(price);
 }
 
+function normalizeText(value: string) {
+  return value
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 function thumbGradient(category: string): [string, string] {
   const c = category.toLowerCase();
   if (c.includes('headphone')) return ['rgba(196, 181, 253, 0.25)', 'rgba(139, 92, 246, 0.12)'];
@@ -388,6 +397,13 @@ type ChatMessage = {
   meta?: string;
 };
 
+type PaymentMethodOption = {
+  id: string;
+  label: string;
+  description?: string;
+  provider?: string;
+};
+
 type CartSheetProps = {
   visible: boolean;
   onClose: () => void;
@@ -400,6 +416,10 @@ type CartSheetProps = {
 function BasketSheet({ visible, onClose, sessionId, cart, loading, onRefresh }: CartSheetProps) {
   const insets = useSafeAreaInsets();
   const [busy, setBusy] = useState<string | null>(null);
+  const [payPickOpen, setPayPickOpen] = useState(false);
+  const [paymentMethods, setPaymentMethods] = useState<PaymentMethodOption[]>([]);
+  const [stripeEnabled, setStripeEnabled] = useState(false);
+  const [methodsLoading, setMethodsLoading] = useState(false);
 
   const run = async (label: string, fn: () => Promise<void>) => {
     if (!sessionId) return;
@@ -428,15 +448,71 @@ function BasketSheet({ visible, onClose, sessionId, cart, loading, onRefresh }: 
       Alert.alert('Reserved', data.message ?? 'Prices held.');
     });
 
-  const checkout = () =>
+  const checkoutWithMethod = (paymentMethodId: string) =>
     run('pay', async () => {
       const data = (await apiJson('/api/cart/checkout', sessionId, {
         method: 'POST',
-        body: JSON.stringify({}),
-      })) as { orderId?: string; message?: string };
-      Alert.alert('Checkout', data.message ?? `Order ${data.orderId ?? ''}`.trim());
+        body: JSON.stringify({ paymentMethodId }),
+      })) as { orderId?: string; message?: string; paymentMethodLabel?: string };
+      setPayPickOpen(false);
+      Alert.alert(
+        'Checkout',
+        data.message ??
+          `Order ${data.orderId ?? ''}${data.paymentMethodLabel ? ` · ${data.paymentMethodLabel}` : ''}`.trim(),
+      );
       onClose();
     });
+
+  const startStripeCheckout = async () => {
+    if (!sessionId) return;
+    if (Platform.OS !== 'web' || typeof window === 'undefined') {
+      Alert.alert('Stripe', 'Open SmartHub in Chrome (web) to pay with a card.');
+      return;
+    }
+    setBusy('stripe');
+    try {
+      const data = (await apiJson('/api/cart/stripe-checkout-session', sessionId, {
+        method: 'POST',
+        body: JSON.stringify({ origin: window.location.origin }),
+      })) as { url?: string };
+      setPayPickOpen(false);
+      if (!data.url) throw new Error('No checkout URL from server');
+      window.location.assign(data.url);
+    } catch (e) {
+      Alert.alert('Stripe', e instanceof Error ? e.message : 'Could not start checkout');
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  useEffect(() => {
+    if (!payPickOpen) return;
+    let cancelled = false;
+    setMethodsLoading(true);
+    apiJson('/api/payments/methods', null)
+      .then((raw) => {
+        if (cancelled || !raw || typeof raw !== 'object') return;
+        const m = (raw as { methods?: PaymentMethodOption[]; stripeEnabled?: boolean }).methods;
+        if (Array.isArray(m)) setPaymentMethods(m);
+        setStripeEnabled(Boolean((raw as { stripeEnabled?: boolean }).stripeEnabled));
+      })
+      .catch((e) => {
+        if (!cancelled) {
+          Alert.alert('Payments', e instanceof Error ? e.message : 'Could not load methods');
+          setPayPickOpen(false);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setMethodsLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [payPickOpen]);
+
+  useEffect(() => {
+    if (!visible) setPayPickOpen(false);
+  }, [visible]);
 
   const clearCart = () =>
     run('clr', async () => {
@@ -448,6 +524,81 @@ function BasketSheet({ visible, onClose, sessionId, cart, loading, onRefresh }: 
       <View style={styles.modalFrame}>
         <Pressable style={styles.modalBackdrop} onPress={onClose} />
         <View style={[styles.basketSheet, { paddingBottom: Math.max(insets.bottom, 20) }]}>
+          {payPickOpen ? (
+            <View style={styles.paymentOverlay} pointerEvents="box-none">
+              <Pressable
+                style={StyleSheet.absoluteFill}
+                onPress={() => (busy ? undefined : setPayPickOpen(false))}
+              />
+              <View style={styles.paymentPickCard}>
+                <Text style={styles.paymentPickTitle}>Pay with</Text>
+                <Text style={styles.paymentPickSub}>
+                  {stripeEnabled && Platform.OS === 'web'
+                    ? 'Stripe (test cards) or demo methods below — no charge for demos.'
+                    : stripeEnabled && Platform.OS !== 'web'
+                      ? 'Demo methods below. Stripe card checkout works in Chrome (web).'
+                      : 'Demo only — no real charge'}
+                </Text>
+                {methodsLoading ? (
+                  <View style={styles.paymentPickLoading}>
+                    <ActivityIndicator color={palette.accent} />
+                  </View>
+                ) : (
+                  <ScrollView style={styles.paymentPickList} showsVerticalScrollIndicator={false}>
+                    {stripeEnabled && Platform.OS === 'web' ? (
+                      <Pressable
+                        style={({ pressed }) => [styles.paymentMethodRow, styles.paymentStripeRow, pressed && styles.pressed]}
+                        onPress={() => startStripeCheckout()}
+                        disabled={busy !== null}
+                      >
+                        <Ionicons name="card" size={22} color="#0f172a" />
+                        <View style={styles.paymentMethodTextCol}>
+                          <Text style={styles.paymentMethodLabel}>Card with Stripe</Text>
+                          <Text style={styles.paymentMethodDesc} numberOfLines={2}>
+                            Secure hosted checkout — use test card 4242… in test mode
+                          </Text>
+                        </View>
+                        {busy === 'stripe' ? (
+                          <ActivityIndicator color={palette.accent} />
+                        ) : (
+                          <Ionicons name="open-outline" size={20} color={palette.textDim} />
+                        )}
+                      </Pressable>
+                    ) : null}
+                    {stripeEnabled && Platform.OS === 'web' && paymentMethods.length > 0 ? (
+                      <Text style={styles.paymentSectionLabel}>Demo (instant)</Text>
+                    ) : null}
+                    {paymentMethods.map((m) => (
+                      <Pressable
+                        key={m.id}
+                        style={({ pressed }) => [styles.paymentMethodRow, pressed && styles.pressed]}
+                        onPress={() => checkoutWithMethod(m.id)}
+                        disabled={busy !== null}
+                      >
+                        <Ionicons name="wallet-outline" size={22} color={palette.accent} />
+                        <View style={styles.paymentMethodTextCol}>
+                          <Text style={styles.paymentMethodLabel}>{m.label}</Text>
+                          {m.description ? (
+                            <Text style={styles.paymentMethodDesc} numberOfLines={2}>
+                              {m.description}
+                            </Text>
+                          ) : null}
+                        </View>
+                        <Ionicons name="chevron-forward" size={20} color={palette.textDim} />
+                      </Pressable>
+                    ))}
+                  </ScrollView>
+                )}
+                <Pressable
+                  onPress={() => setPayPickOpen(false)}
+                  disabled={busy !== null}
+                  style={styles.paymentPickCancel}
+                >
+                  <Text style={styles.paymentPickCancelText}>Cancel</Text>
+                </Pressable>
+              </View>
+            </View>
+          ) : null}
           <View style={styles.sheetHandleWrap}>
             <View style={styles.sheetHandle} />
           </View>
@@ -540,7 +691,7 @@ function BasketSheet({ visible, onClose, sessionId, cart, loading, onRefresh }: 
               </View>
               <Pressable
                 style={({ pressed }) => [styles.ctaWide, pressed && styles.pressed]}
-                onPress={() => checkout()}
+                onPress={() => setPayPickOpen(true)}
                 disabled={busy !== null}
               >
                 <LinearGradient
@@ -741,6 +892,7 @@ function MainScreen() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [searchInput, setSearchInput] = useState('');
   const [search, setSearch] = useState('');
   const [category, setCategory] = useState<CategoryFilter>('All');
   const [condition, setCondition] = useState<ConditionFilter>('All');
@@ -800,6 +952,66 @@ function MainScreen() {
     if (basketOpen && sessionId) refreshCart();
   }, [basketOpen, sessionId, refreshCart]);
 
+  useEffect(() => {
+    if (Platform.OS !== 'web' || typeof window === 'undefined') return;
+    if (!sessionId) return;
+    const params = new URLSearchParams(window.location.search);
+    const checkout = params.get('stripe_checkout');
+    if (!checkout) return;
+
+    const clearStripeQuery = () => {
+      window.history.replaceState({}, '', window.location.pathname + (window.location.hash || ''));
+    };
+
+    if (checkout === 'cancel') {
+      clearStripeQuery();
+      Alert.alert('Checkout', 'Payment was cancelled.');
+      return;
+    }
+
+    if (checkout !== 'success') {
+      clearStripeQuery();
+      return;
+    }
+
+    const stripeSessionId = params.get('session_id');
+    if (!stripeSessionId) {
+      clearStripeQuery();
+      return;
+    }
+
+    clearStripeQuery();
+
+    let cancelled = false;
+    (async () => {
+      try {
+        const data = (await apiJson('/api/cart/stripe-verify', sessionId, {
+          method: 'POST',
+          body: JSON.stringify({ stripeSessionId }),
+        })) as { message?: string; orderId?: string };
+        if (cancelled) return;
+        Alert.alert(
+          'Paid with Stripe',
+          data.message ??
+            (data.orderId ? `Order ${data.orderId}` : 'Thank you for your order.'),
+        );
+        await refreshCart();
+      } catch (e) {
+        if (!cancelled) {
+          Alert.alert('Payment', e instanceof Error ? e.message : 'Could not verify payment');
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [sessionId, refreshCart]);
+
+  const applySearch = () => {
+    setSearch(searchInput.trim());
+  };
+
   const addToCart = useCallback(
     async (productId: string, offerId: string) => {
       if (!sessionId) throw new Error('No session');
@@ -853,9 +1065,13 @@ function MainScreen() {
   }, [items]);
 
   const filtered = useMemo(() => {
-    const q = search.trim().toLowerCase();
+    const q = normalizeText(search);
     return items.filter((p) => {
-      if (q && !p.title.toLowerCase().includes(q) && !p.brand.toLowerCase().includes(q)) {
+      if (!q) return true;
+      const haystack = normalizeText(
+        `${p.title} ${p.brand} ${p.category} ${p.condition}`,
+      );
+      if (!haystack.includes(q)) {
         return false;
       }
       if (category !== 'All' && p.category !== category) return false;
@@ -867,6 +1083,7 @@ function MainScreen() {
   }, [items, search, category, condition]);
 
   const clearFilters = () => {
+    setSearchInput('');
     setSearch('');
     setCategory('All');
     setCondition('All');
@@ -980,21 +1197,42 @@ function MainScreen() {
             <View style={styles.searchShell}>
               <Ionicons name="search" size={20} color={palette.textDim} style={styles.searchIcon} />
               <TextInput
-                value={search}
-                onChangeText={setSearch}
-                placeholder="Search iPhone, Galaxy, AirPods…"
+                value={searchInput}
+                onChangeText={setSearchInput}
+                placeholder="Brand or model — Apply, Search key, or tap outside"
                 placeholderTextColor={palette.textDim}
                 style={styles.searchInput}
                 autoCorrect={false}
                 autoCapitalize="none"
                 returnKeyType="search"
+                blurOnSubmit
+                onSubmitEditing={applySearch}
+                onEndEditing={applySearch}
               />
-              {search.length > 0 ? (
-                <Pressable onPress={() => setSearch('')} hitSlop={12} style={styles.clearSearch}>
+              <Pressable onPress={applySearch} hitSlop={10} style={styles.searchApplyBtn}>
+                <Text style={styles.searchApplyText}>Apply</Text>
+              </Pressable>
+              {searchInput.length > 0 ? (
+                <Pressable
+                  onPress={() => {
+                    setSearchInput('');
+                    setSearch('');
+                  }}
+                  hitSlop={12}
+                  style={styles.clearSearch}
+                >
                   <Ionicons name="close-circle" size={22} color={palette.textMuted} />
                 </Pressable>
               ) : null}
             </View>
+            {search.length > 0 ? (
+              <View style={styles.appliedSearchRow}>
+                <Text style={styles.appliedSearchLabel}>Applied search:</Text>
+                <Text style={styles.appliedSearchValue} numberOfLines={1}>
+                  {search}
+                </Text>
+              </View>
+            ) : null}
           </SafeAreaView>
         </LinearGradient>
       </View>
@@ -1414,6 +1652,37 @@ const styles = StyleSheet.create({
   },
   clearSearch: {
     marginLeft: 4,
+  },
+  searchApplyBtn: {
+    marginLeft: 4,
+    borderRadius: 10,
+    backgroundColor: palette.accentSoft,
+    borderWidth: 1,
+    borderColor: 'rgba(34, 211, 238, 0.35)',
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+  },
+  searchApplyText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: palette.accent,
+  },
+  appliedSearchRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginTop: 10,
+    paddingHorizontal: 4,
+  },
+  appliedSearchLabel: {
+    fontSize: 12,
+    color: palette.textDim,
+  },
+  appliedSearchValue: {
+    flex: 1,
+    fontSize: 12,
+    color: palette.accent,
+    fontWeight: '700',
   },
   filtersBlock: {
     paddingHorizontal: 20,
@@ -2129,6 +2398,7 @@ const styles = StyleSheet.create({
     color: '#0f172a',
   },
   basketSheet: {
+    position: 'relative',
     backgroundColor: palette.bgElevated,
     borderTopLeftRadius: 28,
     borderTopRightRadius: 28,
@@ -2137,6 +2407,91 @@ const styles = StyleSheet.create({
     maxHeight: '92%',
     paddingHorizontal: 20,
     paddingTop: 8,
+    overflow: 'hidden',
+  },
+  paymentOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: palette.modalOverlay,
+    justifyContent: 'center',
+    paddingHorizontal: 16,
+    zIndex: 40,
+  },
+  paymentPickCard: {
+    backgroundColor: palette.surface,
+    borderRadius: 20,
+    padding: 18,
+    borderWidth: 1,
+    borderColor: palette.border,
+    maxHeight: '75%',
+  },
+  paymentPickTitle: {
+    fontSize: 20,
+    fontWeight: '800',
+    color: palette.text,
+    letterSpacing: -0.3,
+  },
+  paymentPickSub: {
+    fontSize: 13,
+    color: palette.textMuted,
+    marginTop: 4,
+    marginBottom: 14,
+  },
+  paymentPickLoading: {
+    paddingVertical: 32,
+    alignItems: 'center',
+  },
+  paymentPickList: {
+    maxHeight: 320,
+  },
+  paymentMethodRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    paddingVertical: 14,
+    paddingHorizontal: 12,
+    borderRadius: 14,
+    backgroundColor: palette.bgElevated,
+    marginBottom: 8,
+    borderWidth: 1,
+    borderColor: palette.border,
+  },
+  paymentStripeRow: {
+    backgroundColor: 'rgba(99, 91, 255, 0.1)',
+    borderColor: 'rgba(99, 91, 255, 0.35)',
+    marginBottom: 12,
+  },
+  paymentSectionLabel: {
+    fontSize: 11,
+    fontWeight: '800',
+    color: palette.textDim,
+    textTransform: 'uppercase',
+    letterSpacing: 0.7,
+    marginBottom: 8,
+  },
+  paymentMethodTextCol: {
+    flex: 1,
+    minWidth: 0,
+  },
+  paymentMethodLabel: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: palette.text,
+  },
+  paymentMethodDesc: {
+    fontSize: 12,
+    color: palette.textMuted,
+    marginTop: 4,
+    lineHeight: 16,
+  },
+  paymentPickCancel: {
+    marginTop: 12,
+    alignItems: 'center',
+    paddingVertical: 10,
+  },
+  paymentPickCancelText: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: palette.textMuted,
   },
   basketHeader: {
     flexDirection: 'row',
